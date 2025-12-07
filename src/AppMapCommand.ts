@@ -1,6 +1,6 @@
 export type ArchiveOptions = {
   revision?: string;
-  index?: boolean;
+  analyze?: boolean;
   threadCount?: number;
 };
 
@@ -9,10 +9,12 @@ export type RestoreOptions = {
   exact: boolean;
 };
 
-export default interface ArchiveCommand {
+export const INVENTORY_DIR = '.appmap/inventory';
+
+export default interface AppMapCommand {
   archive(options: ArchiveOptions): Promise<void>;
 
   restore(options: RestoreOptions): Promise<void>;
 
-  generateOpenAPI(directory: string): Promise<void>;
+  generateConfigurationReport(revision: string): Promise<void>;
 }

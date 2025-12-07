@@ -1,20 +1,26 @@
 import * as core from '@actions/core';
 import assert from 'assert';
-import {cp, mkdir, readFile, stat} from 'fs/promises';
-import locateArchiveFile from './locateArchiveFile';
-import ArchiveAction from './ArchiveAction';
-import log, {LogLevel} from './log';
-import ArchiveResults from './ArchiveResults';
-import {ArchiveOptions, RestoreOptions} from './ArchiveCommand';
+import {cp, mkdir, readFile, rm, stat} from 'fs/promises';
 import {glob} from 'glob';
 import {basename, join} from 'path';
 import {existsSync} from 'fs';
 import {ArgumentParser} from 'argparse';
-import verbose from './verbose';
-import CLIArchiveCommand from './CLIArchiveCommand';
-import LocalArtifactStore from './LocalArtifactStore';
+import {
+  ActionLogger,
+  log,
+  LogLevel,
+  setLogger,
+  verbose,
+  DirectoryArtifactStore,
+  uploadArtifact,
+} from '@appland/action-utils';
+
+import locateArchiveFile, {listArchiveFiles} from './locateArchiveFile';
+import ArchiveAction from './ArchiveAction';
+import ArchiveResults from './ArchiveResults';
+import {ArchiveOptions, RestoreOptions} from './AppMapCommand';
+import CLIAppMapCommand from './CLIAppMapCommand';
 import LocalCacheStore from './LocalCacheStore';
-import {setVerbose} from './setVerbose';
 
 export class Merge extends ArchiveAction {
   constructor(public archiveCount: number) {
@@ -42,6 +48,7 @@ export class Merge extends ArchiveAction {
         `Archive file ${archiveFile} was not restored from the cache`
       );
       await this.unpackArchive(worker.toString());
+      await rm(archiveFile);
     }
 
     const workDirs = (await glob('.appmap/work/*')).filter(dir => {
@@ -90,25 +97,37 @@ export class Merge extends ArchiveAction {
       }
     }
 
-    // TODO: Each archive directory already contains an openapi.yml file, so it would be
-    // quite possible, and much more efficient, to merge those files instead of generating
-    // a new one from scratch.
-    log(LogLevel.Info, 'Generating OpenAPI definitions');
-    await this.archiveCommand.generateOpenAPI(appmapDir);
+    // Check that there are no existing archive files, for unambiguous upload
+    {
+      const archiveFiles = await listArchiveFiles('.');
+      if (archiveFiles.length > 0)
+        log(LogLevel.Warn, `Multiple AppMap archives found in ${join(process.cwd())}`);
+    }
 
     log(LogLevel.Info, 'Building merged archive');
-    const archiveOptions: ArchiveOptions = {index: false};
+    const archiveOptions: ArchiveOptions = {analyze: false};
     if (this.revision) archiveOptions.revision = this.revision;
-    await this.archiveCommand.archive(archiveOptions);
+    await this.appMapCommand.archive(archiveOptions);
 
+    log(LogLevel.Info, 'Optionally sending configuration report');
+    if (await this.configurationReporter.shouldReportConfiguration(this.revision)) {
+      assert(this.revision);
+      await this.configurationReporter.report(
+        this.revision,
+        this.appMapCommand,
+        this.artifactStore,
+        this.githubToken
+      );
+    }
+
+    log(LogLevel.Info, 'Saving archive');
     const archiveFile = await locateArchiveFile('.');
-
-    return await this.uploadArtifact(archiveFile);
+    return await uploadArtifact(this.artifactStore, archiveFile);
   }
 
   async unpackArchive(archiveId: string) {
     const options: RestoreOptions = {revision: archiveId, exact: true};
-    await this.archiveCommand.restore(options);
+    await this.appMapCommand.restore(options);
 
     const workDir = join('.appmap/work', archiveId);
     const workDirStats = await stat(workDir);
@@ -117,11 +136,18 @@ export class Merge extends ArchiveAction {
 }
 
 async function runInGitHub() {
+  verbose(core.getInput('verbose'));
+  setLogger(new ActionLogger());
+
   const archiveCount = core.getInput('archive-count');
   assert(archiveCount, 'archive-count is not set');
+  const revision = core.getInput('revision') || process.env.GITHUB_SHA;
 
   const action = new Merge(parseInt(archiveCount, 10));
-  ArchiveAction.prepareAction(action);
+  ArchiveAction.applyGitHubActionInputs(action);
+
+  if (revision) action.revision = revision;
+
   await action.merge();
 }
 
@@ -131,6 +157,7 @@ async function runLocally() {
   });
   parser.add_argument('-v', '--verbose');
   parser.add_argument('-d', '--directory', {help: 'Program working directory'});
+  parser.add_argument('--artifact-dir', {default: '.appmap/artifacts'});
   parser.add_argument('--appmap-command', {default: 'appmap'});
   parser.add_argument('-r', '--revision', {help: 'Git revision'});
   parser.add_argument('-c', '--archive-count', {required: true});
@@ -141,13 +168,14 @@ async function runLocally() {
   const {
     directory,
     archive_count: archiveCount,
+    artifact_dir: artifactDir,
     revision,
     appmap_command: appmapCommand,
     job_run_id: jobRunId,
     job_attempt_id: jobAttemptId,
   } = options;
 
-  setVerbose(options.verbose);
+  verbose(options.verbose);
 
   if (directory) process.chdir(directory);
 
@@ -155,11 +183,11 @@ async function runLocally() {
   action.jobRunId = jobRunId;
   action.jobAttemptId = jobAttemptId;
   if (appmapCommand) {
-    const archiveCommand = new CLIArchiveCommand();
-    archiveCommand.toolsCommand = appmapCommand;
-    action.archiveCommand = archiveCommand;
+    const appMapCommand = new CLIAppMapCommand();
+    appMapCommand.toolsCommand = appmapCommand;
+    action.appMapCommand = appMapCommand;
   }
-  action.artifactStore = new LocalArtifactStore();
+  action.artifactStore = new DirectoryArtifactStore(artifactDir);
   action.cacheStore = new LocalCacheStore();
   if (revision) action.revision = revision;
   await action.merge();

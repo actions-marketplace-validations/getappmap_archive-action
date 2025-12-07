@@ -1,14 +1,12 @@
 import * as core from '@actions/core';
-import {basename, dirname} from 'path';
-import log, {LogLevel} from './log';
-import ArtifactStore from './ArtifactStore';
+import {log, LogLevel, ArtifactStore, GitHubArtifactStore} from '@appland/action-utils';
+
 import CacheStore from './CacheStore';
-import ArchiveCommand from './ArchiveCommand';
-import GitHubArtifactStore from './GitHubArtifactStore';
+import AppMapCommand from './AppMapCommand';
 import GitHubCacheStore from './GitHubCacheStore';
-import CLIArchiveCommand from './CLIArchiveCommand';
-import verbose from './verbose';
-import {setVerbose} from './setVerbose';
+import CLIAppMapCommand from './CLIAppMapCommand';
+import GitHubConfigurationReporter from './GitHubConfigurationReporter';
+import ConfigurationReporter from './ConfigurationReporter';
 
 export default abstract class ArchiveAction {
   public jobRunId: string | number | undefined = process.env.GITHUB_RUN_ID;
@@ -16,7 +14,10 @@ export default abstract class ArchiveAction {
 
   public artifactStore: ArtifactStore = new GitHubArtifactStore();
   public cacheStore: CacheStore = new GitHubCacheStore();
-  public archiveCommand: ArchiveCommand = new CLIArchiveCommand();
+  public appMapCommand: AppMapCommand = new CLIAppMapCommand();
+  public configurationReporter: ConfigurationReporter = new GitHubConfigurationReporter();
+
+  public githubToken?: string;
   public revision?: string;
 
   static cacheKey(
@@ -32,33 +33,13 @@ export default abstract class ArchiveAction {
     ].join('-');
   }
 
-  static prepareAction(action: ArchiveAction) {
-    setVerbose(core.getInput('verbose'));
-
+  static applyGitHubActionInputs(action: ArchiveAction) {
     const directory = core.getInput('directory');
-    // commit-sha is checked for backwards compatibility
-    const revision =
-      core.getInput('revision') || core.getInput('commit-sha') || process.env.GITHUB_SHA;
-
     if (directory) {
       log(LogLevel.Info, `Changing to working directory ${directory}`);
       process.chdir(directory);
     }
-    if (revision) action.revision = revision;
-  }
 
-  protected async uploadArtifact(archiveFile: string): Promise<{archiveFile: string}> {
-    log(LogLevel.Debug, `Processing AppMap archive ${archiveFile}`);
-
-    // e.g. .appmap/archive/full
-    const dir = dirname(archiveFile);
-    // e.g. appmap-archive-full
-    const artifactPrefix = dir.replace(/\//g, '-').replace(/\./g, '');
-    const [sha] = basename(archiveFile).split('.');
-    const artifactName = `${artifactPrefix}_${sha}.tar`;
-
-    await this.artifactStore.uploadArtifact(artifactName, archiveFile);
-
-    return {archiveFile};
+    action.githubToken = core.getInput('github-token');
   }
 }
